@@ -24,6 +24,9 @@ pub use protocol::client_builder::ProtocolClientBuilder;
 pub use protocol::messages::{ClientHello, ServerHello};
 pub use scheduler::AudioScheduler;
 
+#[cfg(feature = "pipewire")]
+pub use audio::PwSyncedPlayer;
+
 /// Result type for sendspin operations
 pub type Result<T> = std::result::Result<T, error::Error>;
 
