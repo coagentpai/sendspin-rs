@@ -34,14 +34,17 @@ pub struct PwSyncedPlayer {
 impl PwSyncedPlayer {
     /// Create a new PipeWire synced player.
     ///
-    /// Unlike `SyncedPlayer`, no device parameter is needed — PipeWire handles
-    /// device routing via AUTOCONNECT.
+    /// `stream_name` sets the PipeWire node name and description.
+    /// If `target_node` is `Some`, the stream routes to that specific node (sink name).
+    /// Otherwise PipeWire AUTOCONNECT picks the default.
     pub fn new(
         format: AudioFormat,
         clock_sync: Arc<Mutex<ClockSync>>,
         process_callback: Option<ProcessCallback>,
         volume: u8,
         muted: bool,
+        stream_name: &str,
+        target_node: Option<String>,
     ) -> Result<Self, Error> {
         if format.channels == 0 {
             return Err(Error::Output("channels must be > 0".to_string()));
@@ -58,6 +61,7 @@ impl PwSyncedPlayer {
         let thread_running = Arc::clone(&running);
         let thread_error = Arc::clone(&last_error);
         let thread_format = format.clone();
+        let thread_stream_name = stream_name.to_string();
 
         let thread_handle = std::thread::Builder::new()
             .name("pw-synced-audio".to_string())
@@ -69,6 +73,8 @@ impl PwSyncedPlayer {
                     thread_gain,
                     process_callback,
                     thread_running,
+                    &thread_stream_name,
+                    target_node,
                 ) {
                     log::error!("PipeWire loop error: {}", e);
                     *thread_error.lock() = Some(e);
@@ -160,6 +166,8 @@ fn run_pipewire_loop(
     gain_control: GainControl,
     process_callback: Option<ProcessCallback>,
     running: Arc<AtomicBool>,
+    stream_name: &str,
+    target_node: Option<String>,
 ) -> Result<(), String> {
     pw::init();
 
@@ -171,16 +179,22 @@ fn run_pipewire_loop(
         .connect_rc(None)
         .map_err(|e| format!("Failed to connect: {:?}", e))?;
 
+    let mut props = pw::properties::properties! {
+        *pw::keys::MEDIA_TYPE => "Audio",
+        *pw::keys::MEDIA_ROLE => "Music",
+        *pw::keys::MEDIA_CATEGORY => "Playback",
+        *pw::keys::NODE_NAME => stream_name,
+        *pw::keys::NODE_DESCRIPTION => stream_name,
+    };
+    if let Some(ref target) = target_node {
+        props.insert("node.target", target.as_str());
+        log::info!("PipeWire stream targeting node: {}", target);
+    }
+
     let stream = pw::stream::StreamBox::new(
         &core,
-        "pipeplay-sendspin",
-        pw::properties::properties! {
-            *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_ROLE => "Music",
-            *pw::keys::MEDIA_CATEGORY => "Playback",
-            *pw::keys::NODE_NAME => "pipeplay-sendspin",
-            *pw::keys::NODE_DESCRIPTION => "Pipeplay Sendspin Audio",
-        },
+        stream_name,
+        props,
     )
     .map_err(|e| format!("Failed to create stream: {:?}", e))?;
 
