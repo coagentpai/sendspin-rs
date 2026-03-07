@@ -231,11 +231,35 @@ fn run_pipewire_loop(
                             )
                         };
 
-                        // Render into the PipeWire buffer using AudioRenderer.
-                        // PipeWire RT callbacks fire just-in-time, so Instant::now()
-                        // is the playback instant (within ~1.5ms deadband).
+                        // Query PipeWire's downstream sink delay (includes graph
+                        // latency + hardware/Bluetooth buffering). RT-safe.
+                        let sink_delay = {
+                            let mut time: pw::sys::pw_time = unsafe { std::mem::zeroed() };
+                            let ret = unsafe {
+                                pw::sys::pw_stream_get_time_n(
+                                    stream.as_raw_ptr(),
+                                    &mut time,
+                                    std::mem::size_of::<pw::sys::pw_time>(),
+                                )
+                            };
+                            if ret == 0 && time.rate.denom > 0 && time.delay > 0 {
+                                // delay is in graph rate units (samples); convert to Duration
+                                Duration::from_nanos(
+                                    (time.delay as u64)
+                                        .saturating_mul(time.rate.num as u64)
+                                        .saturating_mul(1_000_000_000)
+                                        / time.rate.denom as u64,
+                                )
+                            } else {
+                                Duration::ZERO
+                            }
+                        };
+
+                        // Shift playback_instant forward by sink delay so the
+                        // renderer picks samples that are further ahead in the
+                        // timeline, compensating for downstream latency.
                         let dst = &mut dst[..n_samples];
-                        state.renderer.render(dst, Instant::now());
+                        state.renderer.render(dst, Instant::now() + sink_delay);
 
                         let chunk = data.chunk_mut();
                         *chunk.offset_mut() = 0;
