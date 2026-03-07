@@ -156,6 +156,7 @@ impl Drop for PwSyncedPlayer {
 struct PwCallbackState {
     renderer: AudioRenderer,
     channels: u32,
+    last_delay_us: u64,
 }
 
 /// Run the PipeWire main loop with an audio stream.
@@ -203,6 +204,7 @@ fn run_pipewire_loop(
     let state = PwCallbackState {
         renderer,
         channels: format.channels as u32,
+        last_delay_us: 0,
     };
 
     let _listener = stream
@@ -254,6 +256,17 @@ fn run_pipewire_loop(
                                 Duration::ZERO
                             }
                         };
+
+                        // Log when sink delay changes significantly (>1ms)
+                        let delay_us = sink_delay.as_micros() as u64;
+                        let diff = delay_us.abs_diff(state.last_delay_us);
+                        if diff > 1000 {
+                            log::info!(
+                                "PipeWire sink delay: {:.1}ms",
+                                delay_us as f64 / 1000.0
+                            );
+                            state.last_delay_us = delay_us;
+                        }
 
                         // Shift playback_instant forward by sink delay so the
                         // renderer picks samples that are further ahead in the
