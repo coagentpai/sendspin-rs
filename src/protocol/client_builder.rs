@@ -20,6 +20,7 @@ pub struct ProtocolClientBuilderRaw {
     artwork_v1_support: Option<ArtworkV1Support>,
     visualizer_v1_support: Option<VisualizerV1Support>,
     metadata_v1_support: Option<MetadataV1Support>,
+    controller_v1: bool,
 }
 
 impl From<ProtocolClientBuilderRaw> for ProtocolClientBuilder {
@@ -61,6 +62,9 @@ impl From<ProtocolClientBuilderRaw> for ProtocolClientBuilder {
         if raw.metadata_v1_support.is_some() {
             supported_roles.push("metadata@v1".to_string());
         }
+        if raw.controller_v1 {
+            supported_roles.push("controller@v1".to_string());
+        }
 
         ProtocolClientBuilder {
             client_id: raw.client_id,
@@ -97,6 +101,8 @@ pub struct ProtocolClientBuilderFields {
     visualizer_v1_support: Option<VisualizerV1Support>,
     #[builder(default = None, setter(transform = |x: MetadataV1Support| Some(x)))]
     metadata_v1_support: Option<MetadataV1Support>,
+    #[builder(default = false)]
+    controller_v1: bool,
 }
 
 impl From<ProtocolClientBuilderFields> for ProtocolClientBuilder {
@@ -111,6 +117,7 @@ impl From<ProtocolClientBuilderFields> for ProtocolClientBuilder {
             artwork_v1_support: fields.artwork_v1_support,
             visualizer_v1_support: fields.visualizer_v1_support,
             metadata_v1_support: fields.metadata_v1_support,
+            controller_v1: fields.controller_v1,
         };
         raw.into()
     }
