@@ -101,6 +101,12 @@ pub struct ClientHello {
         skip_serializing_if = "Option::is_none"
     )]
     pub visualizer_v1_support: Option<VisualizerV1Support>,
+    /// Metadata capabilities (if client supports metadata@v1 role)
+    #[serde(
+        rename = "metadata@v1_support",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub metadata_v1_support: Option<MetadataV1Support>,
 }
 
 /// Device information (all fields optional per spec)
@@ -191,6 +197,10 @@ pub struct VisualizerV1Support {
     /// Buffer capacity for visualization data
     pub buffer_capacity: u32,
 }
+
+/// Metadata@v1 capabilities (no configuration needed)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataV1Support {}
 
 /// Server hello message
 #[derive(Debug, Clone, Serialize, Deserialize)]

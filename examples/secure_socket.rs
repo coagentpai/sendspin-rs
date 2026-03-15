@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         artwork_v1_support: None,
         visualizer_v1_support: None,
+        metadata_v1_support: None,
     };
 
     println!("Connecting to {}...", args.server);

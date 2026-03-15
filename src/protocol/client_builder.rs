@@ -2,7 +2,7 @@
 
 use crate::error::Error;
 use crate::protocol::messages::{
-    ArtworkV1Support, AudioFormatSpec, ClientHello, DeviceInfo, PlayerV1Support,
+    ArtworkV1Support, AudioFormatSpec, ClientHello, DeviceInfo, MetadataV1Support, PlayerV1Support,
     VisualizerV1Support,
 };
 use crate::ProtocolClient;
@@ -19,6 +19,7 @@ pub struct ProtocolClientBuilderRaw {
     player_v1_support: Option<PlayerV1Support>,
     artwork_v1_support: Option<ArtworkV1Support>,
     visualizer_v1_support: Option<VisualizerV1Support>,
+    metadata_v1_support: Option<MetadataV1Support>,
 }
 
 impl From<ProtocolClientBuilderRaw> for ProtocolClientBuilder {
@@ -57,6 +58,9 @@ impl From<ProtocolClientBuilderRaw> for ProtocolClientBuilder {
         if raw.visualizer_v1_support.is_some() {
             supported_roles.push("visualizer@v1".to_string());
         }
+        if raw.metadata_v1_support.is_some() {
+            supported_roles.push("metadata@v1".to_string());
+        }
 
         ProtocolClientBuilder {
             client_id: raw.client_id,
@@ -68,6 +72,7 @@ impl From<ProtocolClientBuilderRaw> for ProtocolClientBuilder {
             player_v1_support,
             artwork_v1_support: raw.artwork_v1_support,
             visualizer_v1_support: raw.visualizer_v1_support,
+            metadata_v1_support: raw.metadata_v1_support,
         }
     }
 }
@@ -90,6 +95,8 @@ pub struct ProtocolClientBuilderFields {
     artwork_v1_support: Option<ArtworkV1Support>,
     #[builder(default = None, setter(transform = |x: VisualizerV1Support| Some(x)))]
     visualizer_v1_support: Option<VisualizerV1Support>,
+    #[builder(default = None, setter(transform = |x: MetadataV1Support| Some(x)))]
+    metadata_v1_support: Option<MetadataV1Support>,
 }
 
 impl From<ProtocolClientBuilderFields> for ProtocolClientBuilder {
@@ -103,6 +110,7 @@ impl From<ProtocolClientBuilderFields> for ProtocolClientBuilder {
             player_v1_support: fields.player_v1_support,
             artwork_v1_support: fields.artwork_v1_support,
             visualizer_v1_support: fields.visualizer_v1_support,
+            metadata_v1_support: fields.metadata_v1_support,
         };
         raw.into()
     }
@@ -120,6 +128,7 @@ pub struct ProtocolClientBuilder {
     player_v1_support: Option<PlayerV1Support>,
     artwork_v1_support: Option<ArtworkV1Support>,
     visualizer_v1_support: Option<VisualizerV1Support>,
+    metadata_v1_support: Option<MetadataV1Support>,
 }
 
 impl ProtocolClientBuilder {
@@ -138,6 +147,11 @@ impl ProtocolClientBuilder {
         self.player_v1_support.as_ref()
     }
 
+    /// Get the metadata v1 support configuration
+    pub fn metadata_v1_support(&self) -> Option<&MetadataV1Support> {
+        self.metadata_v1_support.as_ref()
+    }
+
     /// Connect to Sendspin server
     pub async fn connect(self, url: &str) -> Result<ProtocolClient, Error> {
         let hello = ClientHello {
@@ -153,6 +167,7 @@ impl ProtocolClientBuilder {
             player_v1_support: self.player_v1_support.clone(),
             artwork_v1_support: self.artwork_v1_support.clone(),
             visualizer_v1_support: self.visualizer_v1_support.clone(),
+            metadata_v1_support: self.metadata_v1_support.clone(),
         };
         ProtocolClient::connect(url, hello).await
     }

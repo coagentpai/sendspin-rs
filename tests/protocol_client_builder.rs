@@ -1,7 +1,7 @@
 use sendspin::protocol::client_builder::ProtocolClientBuilder;
 use sendspin::protocol::messages::{
-    ArtworkChannel, ArtworkSource, ArtworkV1Support, AudioFormatSpec, ImageFormat, PlayerV1Support,
-    VisualizerV1Support,
+    ArtworkChannel, ArtworkSource, ArtworkV1Support, AudioFormatSpec, ImageFormat,
+    MetadataV1Support, PlayerV1Support, VisualizerV1Support,
 };
 
 #[test]
@@ -146,4 +146,20 @@ fn test_explicit_player_support_is_preserved() {
         .expect("should have player support");
     assert_eq!(support.supported_formats[0].codec, "opus");
     assert_eq!(support.buffer_capacity, 1024);
+}
+
+#[test]
+fn test_supported_roles_with_metadata_v1_support() {
+    let builder = ProtocolClientBuilder::builder()
+        .client_id("test".to_string())
+        .name("Test Client".to_string())
+        .metadata_v1_support(MetadataV1Support {})
+        .build();
+
+    // Default player@v1 is always present, plus the metadata@v1 we added
+    assert!(builder.supported_roles().contains(&"player@v1".to_string()));
+    assert!(builder
+        .supported_roles()
+        .contains(&"metadata@v1".to_string()));
+    assert!(builder.metadata_v1_support().is_some());
 }

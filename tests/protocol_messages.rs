@@ -1,8 +1,8 @@
 use sendspin::protocol::messages::{
     ArtworkChannel, ArtworkSource, ArtworkV1Support, AudioFormatSpec, ClientCommand, ClientGoodbye,
     ClientHello, ClientState, ClientTime, ConnectionReason, ControllerCommand, DeviceInfo,
-    GoodbyeReason, ImageFormat, Message, PlaybackState, PlayerState, PlayerSyncState,
-    PlayerV1Support, RepeatMode, ServerTime,
+    GoodbyeReason, ImageFormat, Message, MetadataV1Support, PlaybackState, PlayerState,
+    PlayerSyncState, PlayerV1Support, RepeatMode, ServerTime,
 };
 
 // =============================================================================
@@ -33,6 +33,7 @@ fn test_client_hello_serialization() {
         }),
         artwork_v1_support: None,
         visualizer_v1_support: None,
+        metadata_v1_support: None,
     };
 
     let message = Message::ClientHello(hello);
@@ -68,6 +69,37 @@ fn test_server_hello_deserialization() {
             assert_eq!(hello.connection_reason, ConnectionReason::Playback);
         }
         _ => panic!("Expected ServerHello"),
+    }
+}
+
+#[test]
+fn test_client_hello_with_metadata_support() {
+    let hello = ClientHello {
+        client_id: "meta-client".to_string(),
+        name: "Metadata Client".to_string(),
+        version: 1,
+        supported_roles: vec!["metadata@v1".to_string()],
+        device_info: None,
+        player_v1_support: None,
+        artwork_v1_support: None,
+        visualizer_v1_support: None,
+        metadata_v1_support: Some(MetadataV1Support {}),
+    };
+
+    let message = Message::ClientHello(hello);
+    let json = serde_json::to_string(&message).unwrap();
+
+    assert!(json.contains("\"metadata@v1_support\":{}"));
+    assert!(json.contains("\"metadata@v1\""));
+
+    // Round-trip
+    let parsed: Message = serde_json::from_str(&json).unwrap();
+    match parsed {
+        Message::ClientHello(h) => {
+            assert!(h.metadata_v1_support.is_some());
+            assert_eq!(h.supported_roles, vec!["metadata@v1"]);
+        }
+        _ => panic!("Expected ClientHello"),
     }
 }
 
