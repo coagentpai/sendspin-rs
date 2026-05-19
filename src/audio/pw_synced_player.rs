@@ -160,6 +160,7 @@ struct PwCallbackState {
 }
 
 /// Run the PipeWire main loop with an audio stream.
+#[allow(clippy::too_many_arguments)]
 fn run_pipewire_loop(
     format: AudioFormat,
     queue: Arc<Mutex<PlaybackQueue>>,
