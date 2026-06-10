@@ -193,12 +193,8 @@ fn run_pipewire_loop(
         log::info!("PipeWire stream targeting node: {}", target);
     }
 
-    let stream = pw::stream::StreamBox::new(
-        &core,
-        stream_name,
-        props,
-    )
-    .map_err(|e| format!("Failed to create stream: {:?}", e))?;
+    let stream = pw::stream::StreamBox::new(&core, stream_name, props)
+        .map_err(|e| format!("Failed to create stream: {:?}", e))?;
 
     let renderer = AudioRenderer::new(queue, clock_sync, &format, gain_control, process_callback);
 
@@ -262,10 +258,7 @@ fn run_pipewire_loop(
                         let delay_us = sink_delay.as_micros() as u64;
                         let diff = delay_us.abs_diff(state.last_delay_us);
                         if diff > 1000 {
-                            log::info!(
-                                "PipeWire sink delay: {:.1}ms",
-                                delay_us as f64 / 1000.0
-                            );
+                            log::info!("PipeWire sink delay: {:.1}ms", delay_us as f64 / 1000.0);
                             state.last_delay_us = delay_us;
                         }
 

@@ -591,8 +591,7 @@ mod tests {
             .next_frame(2, 48_000)
             .expect("buffer should not be dropped as stale");
         assert_eq!(
-            frame[0],
-            999i32,
+            frame[0], 999i32,
             "should get the fresh buffer, not stale data"
         );
     }
@@ -655,13 +654,7 @@ mod tests {
 
         let buf_a: Vec<Sample> = (0..2400 * 2).map(|_| 111i32).collect();
         let buf_b: Vec<Sample> = (0..2400 * 2)
-            .map(|i| {
-                if i < 2400 {
-                    222i32
-                } else {
-                    333i32
-                }
-            })
+            .map(|i| if i < 2400 { 222i32 } else { 333i32 })
             .collect();
 
         queue.push(AudioBuffer {
@@ -687,8 +680,7 @@ mod tests {
             .next_frame(2, 48_000)
             .expect("should get a frame from buffer B");
         assert_eq!(
-            frame[0],
-            333i32,
+            frame[0], 333i32,
             "expected skip into second half of buffer B (past the overlap), \
              got first half — backward-timestamped audio was replayed"
         );
@@ -723,8 +715,7 @@ mod tests {
             .next_frame(2, 48_000)
             .expect("should get first frame of buffer B");
         assert_eq!(
-            frame[0],
-            222i32,
+            frame[0], 222i32,
             "buffer B should play from the start (no skip needed)"
         );
     }
@@ -842,10 +833,6 @@ mod tests {
         let frame = queue
             .next_frame(2, 48_000)
             .expect("should return a frame from the next buffer, not panic");
-        assert_eq!(
-            frame[0],
-            222i32,
-            "expected frame from the ahead buffer"
-        );
+        assert_eq!(frame[0], 222i32, "expected frame from the ahead buffer");
     }
 }
