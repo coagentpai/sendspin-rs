@@ -8,6 +8,7 @@ use crate::error::Error;
 use crate::sync::ClockSync;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ pub struct PwSyncedPlayer {
     gain: GainControl,
     last_error: Arc<Mutex<Option<String>>>,
     running: Arc<AtomicBool>,
+    reconnect_tx: mpsc::Sender<Duration>,
     thread_handle: Option<JoinHandle<()>>,
 }
 
@@ -62,6 +64,7 @@ impl PwSyncedPlayer {
         let thread_error = Arc::clone(&last_error);
         let thread_format = format.clone();
         let thread_stream_name = stream_name.to_string();
+        let (reconnect_tx, reconnect_rx) = mpsc::channel();
 
         let thread_handle = std::thread::Builder::new()
             .name("pw-synced-audio".to_string())
@@ -75,6 +78,7 @@ impl PwSyncedPlayer {
                     thread_running,
                     &thread_stream_name,
                     target_node,
+                    reconnect_rx,
                 ) {
                     log::error!("PipeWire loop error: {}", e);
                     *thread_error.lock() = Some(e);
@@ -88,8 +92,27 @@ impl PwSyncedPlayer {
             gain,
             last_error,
             running,
+            reconnect_tx,
             thread_handle: Some(thread_handle),
         })
+    }
+
+    /// Cycle the PipeWire stream: disconnect, stay idle for `idle_gap`, reconnect.
+    ///
+    /// Disconnecting drops the stream's links so the sink goes idle and (after the
+    /// session manager's suspend timeout) releases its device — for Bluetooth sinks
+    /// this issues an A2DP SUSPEND, and the following reconnect issues a fresh
+    /// A2DP START. Some speakers lock in a bad (deep) playout buffer when the
+    /// transport starts while they are still booting; cycling the transport once
+    /// they have settled resets it. `idle_gap` must exceed the session manager's
+    /// node suspend timeout (WirePlumber default: 5s) for the release to happen.
+    ///
+    /// Playback is silent during the gap. The renderer re-anchors to the shared
+    /// clock on resume, so multi-room sync is re-established automatically.
+    pub fn reconnect(&self, idle_gap: Duration) {
+        if self.reconnect_tx.send(idle_gap).is_err() {
+            log::warn!("PipeWire stream reconnect requested but audio thread is gone");
+        }
     }
 
     /// Enqueue a decoded buffer for playback.
@@ -170,6 +193,7 @@ fn run_pipewire_loop(
     running: Arc<AtomicBool>,
     stream_name: &str,
     target_node: Option<String>,
+    reconnect_rx: mpsc::Receiver<Duration>,
 ) -> Result<(), String> {
     pw::init();
 
@@ -307,14 +331,11 @@ fn run_pipewire_loop(
     .into_inner();
 
     let mut params = [Pod::from_bytes(&values).unwrap()];
+    let stream_flags =
+        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS;
 
     stream
-        .connect(
-            Direction::Output,
-            None,
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
-            &mut params,
-        )
+        .connect(Direction::Output, None, stream_flags, &mut params)
         .map_err(|e| format!("Failed to connect stream: {:?}", e))?;
 
     log::info!(
@@ -326,6 +347,37 @@ fn run_pipewire_loop(
     // Run main loop with periodic check for stop signal
     while running.load(Ordering::SeqCst) {
         mainloop.loop_().iterate(Duration::from_millis(100));
+
+        if let Ok(idle_gap) = reconnect_rx.try_recv() {
+            // Coalesce queued requests into one cycle.
+            while reconnect_rx.try_recv().is_ok() {}
+
+            log::info!(
+                "Reconnecting PipeWire stream (idle gap {:.1}s)",
+                idle_gap.as_secs_f64()
+            );
+            if let Err(e) = stream.disconnect() {
+                log::warn!("PipeWire stream disconnect failed: {:?}", e);
+            }
+
+            // Keep iterating the loop while idle so the disconnect is processed
+            // and the sink can suspend (releasing its device/transport).
+            let deadline = Instant::now() + idle_gap;
+            while running.load(Ordering::SeqCst) && Instant::now() < deadline {
+                mainloop.loop_().iterate(Duration::from_millis(100));
+            }
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let mut params = [Pod::from_bytes(&values).unwrap()];
+            match stream.connect(Direction::Output, None, stream_flags, &mut params) {
+                Ok(()) => log::info!("PipeWire stream reconnected"),
+                Err(e) => {
+                    log::error!("PipeWire stream reconnect failed: {:?}", e);
+                }
+            }
+        }
     }
 
     log::info!("PipeWire synced audio output stopped");
