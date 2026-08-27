@@ -7,6 +7,8 @@ pub mod decode;
 pub mod gain;
 /// Buffer pool for reusing audio sample buffers
 pub mod pool;
+/// Backend-agnostic render core shared by playback backends
+pub(crate) mod renderer;
 /// Sync correction planner for drop/insert cadence
 pub mod sync_correction;
 /// Synced playback helper using output timestamps
