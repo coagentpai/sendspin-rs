@@ -56,7 +56,7 @@ impl Default for SyncedPlayerConfig {
 /// Convert a protocol `static_delay_ms` value to microseconds, clamping to
 /// [`MAX_STATIC_DELAY_MS`]. Out-of-range values are clamped rather than
 /// rejected so a sloppy server can't disable playback timing entirely.
-const fn static_delay_ms_to_us(delay_ms: u16) -> u64 {
+pub(crate) const fn static_delay_ms_to_us(delay_ms: u16) -> u64 {
     let clamped = if delay_ms > MAX_STATIC_DELAY_MS {
         MAX_STATIC_DELAY_MS
     } else {

@@ -27,6 +27,9 @@ pub use protocol::manager::{ConnectionManager, ManagedConnection, ManagerConfig}
 pub use protocol::messages::ServerHello;
 pub use sync::raw_clock::{Clock, DefaultClock};
 
+#[cfg(feature = "pipewire")]
+pub use audio::PwSyncedPlayer;
+
 /// Result type for sendspin operations
 pub type Result<T> = std::result::Result<T, error::Error>;
 
