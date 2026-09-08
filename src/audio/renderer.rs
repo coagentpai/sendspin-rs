@@ -526,9 +526,14 @@ impl AudioRenderer {
         // thread stalled; a playback-delta shift means the OS
         // moved the presentation timeline.
         let playback_delta_us = playback_delta.as_micros() as u64;
+        // The floor window is a dead time in the correction loop, so it has to
+        // be bounded in wall-clock terms rather than in callbacks: this
+        // backend's period is whatever quantum the graph hands us, which on
+        // PipeWire can be 256ms where the window was sized for 10ms.
+        let period_us = frames as u64 * 1_000_000 / u64::from(sample_rate.max(1));
+        error_filter.set_callback_period(period_us);
         if let Some(last) = *last_callback_instant {
             let gap_us = callback_instant.duration_since(last).as_micros() as u64;
-            let period_us = frames as u64 * 1_000_000 / u64::from(sample_rate.max(1));
             if gap_us >= 2 * period_us {
                 log::debug!(
                                 "Audio callback gap: {:.1}ms since previous (period ~{:.1}ms), callback={}, generation={}",

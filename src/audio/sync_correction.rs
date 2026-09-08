@@ -118,11 +118,50 @@ impl Default for CorrectionPlanner {
     }
 }
 
-/// Measurements kept by [`SyncErrorFilter`]. 101 callbacks is ~1s at the
-/// common 10ms WASAPI period (2-4s on 20-40ms periods): long enough that the
-/// floor mode gets sampled even through dense flapping, short enough that a
-/// real displacement reaches the output within about a second.
+/// Upper bound on measurements kept by [`SyncErrorFilter`]. 101 callbacks is
+/// ~1s at the common 10ms WASAPI period (2-4s on 20-40ms periods): long enough
+/// that the floor mode gets sampled even through dense flapping, short enough
+/// that a real displacement reaches the output within about a second.
+///
+/// This is a *sample* count, so on backends with a long callback period it no
+/// longer describes the same amount of time — a PipeWire stream that is handed
+/// a 12288-frame quantum wakes every 256ms, which would stretch the window to
+/// ~26s. See [`SYNC_ERROR_WINDOW_SPAN_US`].
 pub(crate) const SYNC_ERROR_WINDOW: usize = 101;
+
+/// Wall-clock span the floor window is allowed to cover.
+///
+/// The window exists to outlast padding-jitter flapping, which is a
+/// *time*-domain phenomenon; sizing it purely in callbacks let a long callback
+/// period stretch it far past what the loop can stay stable with. The floor
+/// lags a rising error by one whole window, so that lag is dead time in the
+/// correction loop: once it grows past a few seconds the loop overshoots every
+/// episode and limit-cycles, audibly (measured on PipeWire at a 256ms
+/// callback: a 27s 0.18% episode injecting 46ms of opposite error, cleared by
+/// a 7s 1.27% episode, repeating every ~148s).
+///
+/// 4s is the top of the span the sample cap already produced on supported
+/// backends ("2-4s on 20-40ms periods"), so this bound changes nothing for
+/// them — 10ms and 20ms callbacks still clamp to 101 samples and 40ms lands on
+/// 100 — while holding every longer period to the same 4s. Swept against the
+/// closed loop from 5ms to 512ms it keeps the worst applied correction at
+/// 0.21%, roughly a thirtieth of a semitone; the unbounded sample count
+/// reaches 1.27% at 256ms and 2.78% at 512ms.
+pub(crate) const SYNC_ERROR_WINDOW_SPAN_US: u64 = 4_000_000;
+
+/// Floor over fewer than this many samples is too easy for a single outlier to
+/// dominate, so the span bound never shrinks the window below it.
+pub(crate) const MIN_SYNC_ERROR_WINDOW: usize = 8;
+
+/// Number of samples whose span stays within [`SYNC_ERROR_WINDOW_SPAN_US`] at
+/// the given callback period, clamped to the supported window range.
+pub(crate) fn window_len_for_period(period_us: u64) -> usize {
+    if period_us == 0 {
+        return SYNC_ERROR_WINDOW;
+    }
+    let fits = SYNC_ERROR_WINDOW_SPAN_US.div_ceil(period_us) as usize;
+    fits.clamp(MIN_SYNC_ERROR_WINDOW, SYNC_ERROR_WINDOW)
+}
 
 /// Windowed minimum (floor tracker) over recent sync-error measurements.
 ///
@@ -154,6 +193,9 @@ pub(crate) struct SyncErrorFilter {
     samples: [i64; SYNC_ERROR_WINDOW],
     len: usize,
     next: usize,
+    /// Live window length: `SYNC_ERROR_WINDOW` until a callback period is
+    /// observed, then whatever fits in [`SYNC_ERROR_WINDOW_SPAN_US`].
+    window: usize,
 }
 
 impl SyncErrorFilter {
@@ -163,6 +205,20 @@ impl SyncErrorFilter {
             samples: [0; SYNC_ERROR_WINDOW],
             len: 0,
             next: 0,
+            window: SYNC_ERROR_WINDOW,
+        }
+    }
+
+    /// Size the window to the observed callback period.
+    ///
+    /// Cheap and idempotent, so the audio callback can call it every wake; a
+    /// period change discards the history, since samples taken at a different
+    /// wake cadence describe a different window.
+    pub fn set_callback_period(&mut self, period_us: u64) {
+        let window = window_len_for_period(period_us);
+        if window != self.window {
+            self.window = window;
+            self.reset();
         }
     }
 
@@ -177,14 +233,14 @@ impl SyncErrorFilter {
     /// window is still returned by [`SyncErrorFilter::update`], but engage
     /// decisions should wait for warmth (see [`EngageGate`]).
     pub fn is_warm(&self) -> bool {
-        self.len == SYNC_ERROR_WINDOW
+        self.len == self.window
     }
 
     /// Record a raw error measurement (µs) and return the windowed minimum.
     pub fn update(&mut self, raw_error_us: i64) -> i64 {
         self.samples[self.next] = raw_error_us;
-        self.next = (self.next + 1) % SYNC_ERROR_WINDOW;
-        if self.len < SYNC_ERROR_WINDOW {
+        self.next = (self.next + 1) % self.window;
+        if self.len < self.window {
             self.len += 1;
         }
         // While filling, the live samples are the contiguous prefix
@@ -605,5 +661,271 @@ mod tests {
             !disengage.is_correcting(),
             "disengage must pass immediately"
         );
+    }
+
+    // -- Closed-loop stability --
+    //
+    // The planner, filter and gate are individually tested above, but the
+    // property that matters in the field is what they do *together* against a
+    // real plant. These tests close the loop: the correction the planner asks
+    // for is applied to a simulated audio timeline, the resulting error is fed
+    // back through the filter, and the loop runs for wall-clock minutes.
+    //
+    // The plant models the two forces that actually move the error:
+    //   1. the drop/insert cadence this module schedules, and
+    //   2. a constant clock-rate offset between the local sound card crystal
+    //      and the server clock — an ordinary tens-of-ppm mismatch that no
+    //      position-only controller can null out, so it re-accumulates error
+    //      between episodes.
+    //
+    // Parameters are measured, not invented. On a PipeWire host (symmetra,
+    // 2026-09-08) the process callback fires every 256.1ms (median of 66
+    // inter-callback intervals derived from logged callback counters; a
+    // 12288-frame quantum at 48kHz), and the idle-gap slope between correction
+    // episodes implies a ~50ppm clock offset. Those two values reproduce the
+    // field behaviour to within a few percent: a 148s limit cycle alternating
+    // a 27s 0.18% slow episode with a 7s 1.27% fast episode.
+
+    /// Measured PipeWire process-callback period (see module note above).
+    const PIPEWIRE_PERIOD: f64 = 0.2561;
+    /// Callback period the filter window was sized for ("~1s at the common
+    /// 10ms WASAPI period", per `SYNC_ERROR_WINDOW`).
+    const DESIGN_PERIOD: f64 = 0.010;
+    /// Sound-card/server clock-rate mismatch, as a fraction (50ppm).
+    const CLOCK_OFFSET: f64 = -50e-6;
+
+    /// One engaged correction episode observed by the harness.
+    #[derive(Debug, Clone, Copy)]
+    struct Episode {
+        start_s: f64,
+        duration_s: f64,
+        /// Speed change applied, as a percentage (always positive).
+        speed_pct: f64,
+        error_at_engage_us: f64,
+        error_at_disengage_us: f64,
+    }
+
+    /// Run the real planner/filter/gate in closed loop over `secs` of
+    /// simulated time and return every correction episode that engaged.
+    fn run_closed_loop(period_s: f64, secs: f64, planner: &CorrectionPlanner) -> Vec<Episode> {
+        const SAMPLE_RATE: u32 = 48_000;
+
+        let mut filter = SyncErrorFilter::new();
+        filter.set_callback_period((period_s * 1_000_000.0) as u64);
+        let mut gate = EngageGate::new();
+        let mut schedule = CorrectionSchedule::default();
+        let mut error_us = 0.0f64;
+        let mut t = 0.0f64;
+
+        let mut episodes = Vec::new();
+        let mut open: Option<(f64, f64, f64)> = None; // start_s, speed_pct, error at engage
+
+        while t < secs {
+            let filtered = filter.update(error_us.round() as i64);
+            let planned = planner.plan(filtered, SAMPLE_RATE, schedule.is_correcting());
+            schedule = gate.admit(planned, schedule.is_correcting(), filter.is_warm());
+
+            // A reanchor is a silent cursor jump, not a rate change: model it
+            // as the error being zeroed and the estimator restarted.
+            if schedule.reanchor {
+                error_us = 0.0;
+                filter.reset();
+                gate.reset();
+                schedule = CorrectionSchedule::default();
+            }
+
+            // Inserting frames stretches the timeline (error rises toward
+            // zero); dropping frames compresses it (error falls).
+            let rate = if schedule.insert_every_n_frames > 0 {
+                1.0 / f64::from(schedule.insert_every_n_frames)
+            } else if schedule.drop_every_n_frames > 0 {
+                -1.0 / f64::from(schedule.drop_every_n_frames)
+            } else {
+                0.0
+            };
+
+            match (open, rate != 0.0) {
+                (None, true) => open = Some((t, rate.abs() * 100.0, error_us)),
+                (Some((start_s, speed_pct, engage_err)), false) => {
+                    episodes.push(Episode {
+                        start_s,
+                        duration_s: t - start_s,
+                        speed_pct,
+                        error_at_engage_us: engage_err,
+                        error_at_disengage_us: error_us,
+                    });
+                    open = None;
+                }
+                _ => {}
+            }
+
+            error_us += (rate + CLOCK_OFFSET) * period_s * 1_000_000.0;
+            t += period_s;
+        }
+        episodes
+    }
+
+    /// Corrections above ~1% are a clearly audible pitch shift (1% is a sixth
+    /// of a semitone); below ~0.5% they are inaudible on program material.
+    const AUDIBLE_SPEED_PCT: f64 = 1.0;
+
+    #[test]
+    fn test_closed_loop_is_quiet_at_the_design_callback_period() {
+        // Sanity anchor for the harness: at the callback period the filter
+        // window was sized for, the same loop against the same clock offset
+        // stays inaudible. If this fails, the harness is wrong, not the code.
+        let episodes = run_closed_loop(DESIGN_PERIOD, 1_200.0, &CorrectionPlanner::new());
+        let worst = episodes.iter().map(|e| e.speed_pct).fold(0.0, f64::max);
+        assert!(
+            worst < AUDIBLE_SPEED_PCT,
+            "at a {:.0}ms callback the loop should stay inaudible, but applied {:.2}%",
+            DESIGN_PERIOD * 1000.0,
+            worst,
+        );
+    }
+
+    #[test]
+    fn test_closed_loop_does_not_limit_cycle_at_pipewire_callback_period() {
+        // Field regression: a 256ms callback stretches SYNC_ERROR_WINDOW from
+        // the ~1s it was designed for to ~26s. The floor then holds a stale
+        // minimum for that whole window, so an episode planned to clear 3.6ms
+        // in `target_seconds` (2s) instead runs ~27s and injects ~46ms of the
+        // opposite error — which the next episode must remove at an audible
+        // rate. The loop never settles.
+        let episodes = run_closed_loop(PIPEWIRE_PERIOD, 1_200.0, &CorrectionPlanner::new());
+        let audible: Vec<_> = episodes
+            .iter()
+            .filter(|e| e.speed_pct >= AUDIBLE_SPEED_PCT)
+            .collect();
+        assert!(
+            audible.is_empty(),
+            "loop limit-cycles at a {:.0}ms callback: {} audible episodes in 1200s, \
+             worst {:.2}% for {:.1}s (first at t={:.0}s)",
+            PIPEWIRE_PERIOD * 1000.0,
+            audible.len(),
+            audible.iter().map(|e| e.speed_pct).fold(0.0, f64::max),
+            audible.iter().map(|e| e.duration_s).fold(0.0, f64::max),
+            audible.first().map(|e| e.start_s).unwrap_or(0.0),
+        );
+    }
+
+    #[test]
+    fn test_correction_episode_does_not_overshoot_past_its_target() {
+        // An episode exists to remove the error it engaged on. Leaving a
+        // larger error of the opposite sign means the corrector is the thing
+        // creating the next episode's work.
+        for &period in &[DESIGN_PERIOD, PIPEWIRE_PERIOD] {
+            let episodes = run_closed_loop(period, 1_200.0, &CorrectionPlanner::new());
+            for e in &episodes {
+                // Some overshoot is unavoidable: the floor lags a rising error
+                // by one window, and that dead time is inside the loop. What
+                // must not happen is an episode leaving *grossly* more error
+                // than it engaged on — that is the corrector manufacturing the
+                // next episode's work, and it is what made the next episode
+                // audible. One engage threshold of slop is the honest bound.
+                let tolerated = e.error_at_engage_us.abs() + 3_000.0;
+                assert!(
+                    e.error_at_disengage_us.abs() <= tolerated,
+                    "at a {:.0}ms callback, an episode engaged on {:.1}ms and \
+                     disengaged on {:.1}ms after {:.1}s at {:.2}% — it overshot",
+                    period * 1000.0,
+                    e.error_at_engage_us / 1000.0,
+                    e.error_at_disengage_us / 1000.0,
+                    e.duration_s,
+                    e.speed_pct,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_window_span_is_inactive_at_classic_callback_periods() {
+        // The bound must not disturb backends that already work: cpal/WASAPI
+        // periods keep the full sample window they were tuned with.
+        for period_ms in [5, 10, 20] {
+            assert_eq!(
+                window_len_for_period(period_ms * 1_000),
+                SYNC_ERROR_WINDOW,
+                "{period_ms}ms callback should keep the full window"
+            );
+        }
+        // 40ms is the longest classic period; 4s/40ms = 100 of 101 samples.
+        assert_eq!(window_len_for_period(40_000), 100);
+    }
+
+    #[test]
+    fn test_window_shrinks_to_hold_the_span_at_long_callback_periods() {
+        // PipeWire handing the stream a 12288-frame quantum at 48kHz.
+        assert_eq!(window_len_for_period(256_100), 16);
+        let span_s = 16.0 * 0.2561;
+        assert!(
+            span_s <= 4.5,
+            "window should cover ~4s of wall time, covers {span_s:.1}s"
+        );
+    }
+
+    #[test]
+    fn test_window_never_shrinks_below_the_floor_minimum() {
+        // A floor over a couple of samples is one outlier away from useless.
+        assert_eq!(window_len_for_period(10_000_000), MIN_SYNC_ERROR_WINDOW);
+        assert_eq!(window_len_for_period(u64::MAX), MIN_SYNC_ERROR_WINDOW);
+    }
+
+    #[test]
+    fn test_unknown_callback_period_keeps_the_full_window() {
+        assert_eq!(window_len_for_period(0), SYNC_ERROR_WINDOW);
+    }
+
+    #[test]
+    fn test_callback_period_change_discards_stale_history() {
+        // Samples taken at a different wake cadence describe a different
+        // window, so a period change must cool the filter rather than let a
+        // stale floor decide the next engage.
+        let mut filter = SyncErrorFilter::new();
+        filter.set_callback_period(10_000);
+        for _ in 0..SYNC_ERROR_WINDOW {
+            filter.update(5_000);
+        }
+        assert!(
+            filter.is_warm(),
+            "filter should be warm after a full window"
+        );
+
+        filter.set_callback_period(256_100);
+        assert!(!filter.is_warm(), "a period change must cool the filter");
+
+        // ...and warm again on the new, shorter window.
+        for _ in 0..window_len_for_period(256_100) {
+            filter.update(5_000);
+        }
+        assert!(filter.is_warm());
+    }
+
+    #[test]
+    fn test_repeated_identical_period_does_not_cool_the_filter() {
+        // The audio callback calls this every wake; it must be idempotent.
+        let mut filter = SyncErrorFilter::new();
+        filter.set_callback_period(256_100);
+        for _ in 0..window_len_for_period(256_100) {
+            filter.update(1_000);
+        }
+        assert!(filter.is_warm());
+        filter.set_callback_period(256_100);
+        assert!(filter.is_warm(), "same period must not reset the window");
+    }
+
+    #[test]
+    fn test_closed_loop_stays_inaudible_across_the_callback_period_range() {
+        // Backends hand out very different quanta; none of them may push the
+        // loop into an audible limit cycle.
+        for period_ms in [5.0, 10.0, 20.0, 40.0, 64.0, 128.0, 256.1, 512.0] {
+            let period_s = period_ms / 1000.0;
+            let episodes = run_closed_loop(period_s, 2_400.0, &CorrectionPlanner::new());
+            let worst = episodes.iter().map(|e| e.speed_pct).fold(0.0, f64::max);
+            assert!(
+                worst < AUDIBLE_SPEED_PCT,
+                "at a {period_ms}ms callback the loop applied {worst:.2}%"
+            );
+        }
     }
 }
