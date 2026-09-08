@@ -1,6 +1,7 @@
 // ABOUTME: Synced audio player with drift correction (PipeWire backend)
 // ABOUTME: Native PipeWire stream driving the shared render core
 
+use crate::audio::device_clock::DeviceClockEstimator;
 use crate::audio::gain::GainControl;
 use crate::audio::synced_player::{PlaybackControl, ProcessCallback};
 use crate::audio::{AudioBuffer, AudioFormat};
@@ -204,6 +205,7 @@ struct PwCallbackState<R> {
     render: R,
     channels: u32,
     last_delay_us: u64,
+    device_clock: DeviceClockEstimator,
 }
 
 /// Run the PipeWire main loop with an audio stream.
@@ -244,6 +246,7 @@ fn run_pipewire_loop(
         render,
         channels: format.channels as u32,
         last_delay_us: 0,
+        device_clock: DeviceClockEstimator::new(),
     };
 
     let _listener = stream
@@ -275,26 +278,45 @@ fn run_pipewire_loop(
 
                         // Query PipeWire's downstream sink delay (includes graph
                         // latency + hardware/Bluetooth buffering). RT-safe.
-                        let sink_delay = {
-                            let mut time: pw::sys::pw_time = unsafe { std::mem::zeroed() };
-                            let ret = unsafe {
-                                pw::sys::pw_stream_get_time_n(
-                                    stream.as_raw_ptr(),
-                                    &mut time,
-                                    std::mem::size_of::<pw::sys::pw_time>(),
-                                )
-                            };
-                            if ret == 0 && time.rate.denom > 0 && time.delay > 0 {
-                                // delay is in graph rate units (samples); convert to Duration
-                                Duration::from_nanos(
-                                    (time.delay as u64)
-                                        .saturating_mul(time.rate.num as u64)
-                                        .saturating_mul(1_000_000_000)
-                                        / time.rate.denom as u64,
-                                )
-                            } else {
-                                Duration::ZERO
+                        let mut time: pw::sys::pw_time = unsafe { std::mem::zeroed() };
+                        let ret = unsafe {
+                            pw::sys::pw_stream_get_time_n(
+                                stream.as_raw_ptr(),
+                                &mut time,
+                                std::mem::size_of::<pw::sys::pw_time>(),
+                            )
+                        };
+                        let time_valid = ret == 0 && time.rate.denom > 0;
+
+                        // Device clock rate: needs only ticks/now/rate, never delay.
+                        if time_valid {
+                            if let Some(r) = state.device_clock.update(
+                                time.ticks,
+                                time.now,
+                                time.rate.num,
+                                time.rate.denom,
+                            ) {
+                                log::info!(
+                                    "Device clock: short={:.1}ppm ({:.1}s), cumulative={:.1}ppm ({:.0}s), resets={}",
+                                    r.short_ppm,
+                                    r.short_span_s,
+                                    r.cumulative_ppm,
+                                    r.cumulative_span_s,
+                                    r.resets,
+                                );
                             }
+                        }
+
+                        let sink_delay = if time_valid && time.delay > 0 {
+                            // delay is in graph rate units (samples); convert to Duration
+                            Duration::from_nanos(
+                                (time.delay as u64)
+                                    .saturating_mul(time.rate.num as u64)
+                                    .saturating_mul(1_000_000_000)
+                                    / time.rate.denom as u64,
+                            )
+                        } else {
+                            Duration::ZERO
                         };
 
                         // Log when sink delay changes significantly (>1ms)

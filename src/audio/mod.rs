@@ -3,6 +3,9 @@
 
 /// Audio decoder implementations (PCM, Opus, FLAC)
 pub mod decode;
+/// Device clock rate estimator driven by PipeWire pw_time.
+#[cfg(feature = "pipewire")]
+pub(crate) mod device_clock;
 mod diagnostics;
 /// Lock-free volume/mute control
 pub mod gain;
