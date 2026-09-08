@@ -343,16 +343,17 @@ fn run_pipewire_loop(
             match stream.dequeue_buffer() {
                 None => {}
                 Some(mut buffer) => {
-                    let datas = buffer.datas_mut();
-                    if datas.is_empty() {
+                    if buffer.datas_mut().is_empty() {
                         return;
                     }
 
+                    let requested = buffer.requested();
+                    let datas = buffer.datas_mut();
                     let data = &mut datas[0];
                     let stride = std::mem::size_of::<f32>() * state.channels as usize;
 
                     if let Some(slice) = data.data() {
-                        let n_frames = slice.len() / stride;
+                        let n_frames = frames_to_fill(requested, slice.len() / stride);
                         let n_samples = n_frames * state.channels as usize;
 
                         // Cast the byte slice to f32 slice
@@ -492,4 +493,53 @@ fn run_pipewire_loop(
 
     log::info!("PipeWire synced audio output stopped");
     Ok(())
+}
+
+/// Frames to fill this cycle.
+///
+/// `requested` is what the graph asked for (`pw_buffer.requested`); 0 means the
+/// server offered no hint, in which case the whole mapped buffer is the only
+/// sensible answer.
+///
+/// Filling the mapped capacity when a request *was* given detaches the callback
+/// period from the graph quantum. `pw_stream` only calls `process` again once a
+/// buffer recycles, so writing a whole 12288-frame buffer makes the stream wake
+/// every 256ms instead of every cycle (21ms at the 1024 quantum this graph
+/// runs), inflating both output latency and the dead time in the sync
+/// correction loop.
+fn frames_to_fill(requested: u64, capacity_frames: usize) -> usize {
+    if requested == 0 {
+        return capacity_frames;
+    }
+    // `requested` comes from the server and indexes a raw mapped slice below,
+    // so clamp rather than trust it.
+    usize::try_from(requested)
+        .unwrap_or(capacity_frames)
+        .min(capacity_frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fills_only_what_the_graph_requested() {
+        // A 1024-frame quantum out of a 12288-frame mapped buffer: writing all
+        // 12288 is what stretched the callback period to 256ms.
+        assert_eq!(frames_to_fill(1024, 12288), 1024);
+    }
+
+    #[test]
+    fn test_fills_the_buffer_when_no_request_is_given() {
+        // `requested == 0` means the server gave no hint.
+        assert_eq!(frames_to_fill(0, 12288), 12288);
+    }
+
+    #[test]
+    fn test_never_writes_past_the_mapped_buffer() {
+        // The server should not ask for more than it mapped, but a request is
+        // an untrusted number and this one indexes a raw slice.
+        assert_eq!(frames_to_fill(99_999, 1024), 1024);
+        assert_eq!(frames_to_fill(u64::MAX, 1024), 1024);
+    }
 }

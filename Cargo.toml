@@ -50,7 +50,9 @@ parking_lot = "0.12"
 typed-builder = "0.23.2"
 
 # PipeWire native audio output (optional)
-pipewire = { version = "0.9", optional = true }
+# `v0_3_49` exposes `pw_buffer.requested` (PipeWire >= 0.3.49, 2022), which the
+# playback callback needs to fill a graph cycle rather than a whole buffer.
+pipewire = { version = "0.9", optional = true, features = ["v0_3_49"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
