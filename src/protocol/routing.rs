@@ -225,11 +225,15 @@ impl ReceiveSinks {
                             .set_static_delay(player.static_delay_ms.unwrap()),
                         _ => unreachable!(),
                     }
-                } else {
-                    self.forward_message(Message::ServerCommand(ServerCommand {
-                        player: Some(player),
-                    }));
                 }
+                // The session applies a command to its output only when it
+                // changes the session's own view of the controls. An
+                // application that decides itself what a command does (refuses
+                // it, or keeps a requested value apart from the applied one)
+                // needs every command as the server sent it.
+                self.forward_message(Message::ServerCommand(ServerCommand {
+                    player: Some(player),
+                }));
             }
             other => {
                 self.forward_message(other);
@@ -403,7 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receive_sinks_clear_is_urgent_and_valid_command_is_not_forwarded() {
+    async fn receive_sinks_clear_is_urgent_and_valid_command_is_also_forwarded() {
         let (mut sinks, receiver, _, _, mut messages) = ReceiveSinks::channel(controls());
         let mut session = receiver.attach(FakePlayer);
         sinks.dispatch_binary(BinaryFrame::Audio(audio(1, &[9])));
@@ -419,6 +423,16 @@ mod tests {
                 static_delay_ms: Some(99),
             }),
         }));
+        assert!(matches!(
+            messages.try_recv(),
+            Ok(Message::ServerCommand(ServerCommand {
+                player: Some(PlayerCommand {
+                    command: PlayerCommandType::Volume,
+                    volume: Some(80),
+                    ..
+                })
+            }))
+        ));
         assert!(messages.try_recv().is_err());
         assert!(matches!(
             session.recv().await,
@@ -699,6 +713,10 @@ mod tests {
             Some(crate::audio::PlayerEvent::Audio(work)) if work.timestamp() == 65
         ));
         assert_eq!(session.controls().borrow().volume, 77);
+        assert!(matches!(
+            messages.recv().await,
+            Some(Message::ServerCommand(ServerCommand { player: Some(_) }))
+        ));
         assert!(matches!(
             messages.recv().await,
             Some(Message::ServerCommand(ServerCommand { player: None }))

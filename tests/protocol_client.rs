@@ -1470,6 +1470,19 @@ async fn test_public_websocket_clear_commands_and_fallback() {
     let mut controls = player.controls();
     controls.changed().await.unwrap();
     assert_eq!(controls.borrow().volume, 73);
+    let forwarded = tokio::time::timeout(std::time::Duration::from_secs(2), conn.messages.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        forwarded,
+        Message::ServerCommand(ServerCommand {
+            player: Some(PlayerCommand {
+                volume: Some(73),
+                ..
+            })
+        })
+    ));
 
     let invalid = Message::ServerCommand(ServerCommand {
         player: Some(PlayerCommand {
