@@ -1624,16 +1624,28 @@ impl SyncedPlayer {
         (self.static_delay_us.load(Ordering::Relaxed) / 1_000) as u16
     }
 
-    fn build_stream(
-        device: &Device,
-        config: &StreamConfig,
+    /// Builds the render core that a backend drives from its audio callback.
+    ///
+    /// Every call fills `data` completely (silence while gated), applies gain
+    /// and runs the process callback. `playback_delta` is how far in the
+    /// future these samples reach the output: cpal's `playback - callback`
+    /// timestamps, or the sink delay PipeWire reports.
+    ///
+    /// The body is the audio callback the cpal stream used to own inline. It
+    /// is kept exactly as it was there, original indentation included (hence
+    /// the two attributes), so that it stays line-for-line comparable with
+    /// upstream.
+    #[rustfmt::skip]
+    #[allow(clippy::collapsible_if)]
+    fn render_callback<S>(
         queue: Arc<Mutex<PlaybackQueue>>,
         clock_sync: Arc<Mutex<ClockSync>>,
-        format: AudioFormat,
+        format: &AudioFormat,
         mut cb_config: CallbackConfig,
-        outputs: CallbackOutputs,
-    ) -> Result<Stream, Error> {
-        let CallbackOutputs { error } = outputs;
+    ) -> impl FnMut(&mut [S], Duration) + Send + 'static
+    where
+        S: Sample + cpal::FromSample<f32> + Send + 'static,
+    {
         let channels = format.channels as usize;
         let sample_rate = format.sample_rate;
         let mut correction = StartupCorrectionState::new();
@@ -1653,32 +1665,21 @@ impl SyncedPlayer {
         let initial_gain = cb_config.gain_control.gain();
         let mut gain_ramp = GainRamp::new(sample_rate, initial_gain);
         let mut f32_buffer = Vec::<f32>::new();
-        let device_config = device
-            .default_output_config()
-            .map_err(|e| Error::Output(e.to_string()))?;
-        let mut stream_config = device_config.config();
-        stream_config.buffer_size = config.buffer_size;
-        stream_config.channels = format.channels.into();
-        stream_config.sample_rate = format.sample_rate;
 
-        macro_rules! output_stream {
-            ($sample:ty) => {
-                device.build_output_stream(
-                    stream_config,
-                    move |data: &mut [$sample], info: &cpal::OutputCallbackInfo| {
-                    let mut process_output = |data: &mut [$sample], buffer: &mut Vec<f32>| {
+                    move |data: &mut [S], playback_delta: Duration| {
+                    let mut process_output = |data: &mut [S], buffer: &mut Vec<f32>| {
                         if let Some(ref mut cb) = cb_config.process_callback {
                             cb(buffer);
                         }
 
                         for (dst, &sample) in data.iter_mut().zip(buffer.iter()) {
-                            *dst = <$sample>::from_sample(sample);
+                            *dst = S::from_sample(sample);
                         }
                     };
 
                     // Advance the gain ramp even while silent so the first real
                     // audio resumes at the target gain with no fade-in.
-                    let mut emit_silence = |data: &mut [$sample]| {
+                    let mut emit_silence = |data: &mut [S]| {
                         let target = cb_config.gain_control.gain();
                         gain_ramp.advance(data.len() / channels, target);
                         f32_buffer.clear();
@@ -1750,8 +1751,6 @@ impl SyncedPlayer {
                     }
 
                     let callback_instant = Instant::now();
-                    let ts = info.timestamp();
-                    let playback_delta = ts.playback.duration_since(ts.callback);
                     let playback_instant = callback_instant + playback_delta;
 
                     // Both values are normally steady, so a step in either
@@ -2350,35 +2349,71 @@ impl SyncedPlayer {
                             playback_reset_generation,
                         );
                     }
-                    },
-                    move |err| {
-                        // These recoverable notifications do not invalidate a working stream;
-                        // only other callback errors are retained for take_error()/has_error().
-                        match err.kind() {
-                            cpal::ErrorKind::RealtimeDenied => {
-                                log::warn!(
-                                    "Audio thread priority promotion failed (non-fatal): {err}"
-                                );
+                    }
+    }
+
+    fn build_stream(
+        device: &Device,
+        config: &StreamConfig,
+        queue: Arc<Mutex<PlaybackQueue>>,
+        clock_sync: Arc<Mutex<ClockSync>>,
+        format: AudioFormat,
+        cb_config: CallbackConfig,
+        outputs: CallbackOutputs,
+    ) -> Result<Stream, Error> {
+        let CallbackOutputs { error } = outputs;
+        let device_config = device
+            .default_output_config()
+            .map_err(|e| Error::Output(e.to_string()))?;
+        let mut stream_config = device_config.config();
+        stream_config.buffer_size = config.buffer_size;
+        stream_config.channels = format.channels.into();
+        stream_config.sample_rate = format.sample_rate;
+
+        macro_rules! output_stream {
+            ($sample:ty) => {
+                device
+                    .build_output_stream(
+                        stream_config,
+                        {
+                            let mut render = Self::render_callback::<$sample>(
+                                queue, clock_sync, &format, cb_config,
+                            );
+                            move |data: &mut [$sample], info: &cpal::OutputCallbackInfo| {
+                                let ts = info.timestamp();
+                                render(data, ts.playback.duration_since(ts.callback));
                             }
-                            cpal::ErrorKind::Xrun => {
-                                static XRUNS: AtomicU64 = AtomicU64::new(0);
-                                let count = XRUNS.fetch_add(1, Ordering::Relaxed) + 1;
-                                if should_log_sample(count) {
-                                    log::debug!("Audio callback underrun (xrun): {err}");
+                        },
+                        move |err| {
+                            // These recoverable notifications do not invalidate a working stream;
+                            // only other callback errors are retained for take_error()/has_error().
+                            match err.kind() {
+                                cpal::ErrorKind::RealtimeDenied => {
+                                    log::warn!(
+                                        "Audio thread priority promotion failed (non-fatal): {err}"
+                                    );
+                                }
+                                cpal::ErrorKind::Xrun => {
+                                    static XRUNS: AtomicU64 = AtomicU64::new(0);
+                                    let count = XRUNS.fetch_add(1, Ordering::Relaxed) + 1;
+                                    if should_log_sample(count) {
+                                        log::debug!("Audio callback underrun (xrun): {err}");
+                                    }
+                                }
+                                cpal::ErrorKind::DeviceChanged => {
+                                    log::warn!(
+                                        "Audio device changed; playback stream continues: {err}"
+                                    );
+                                }
+                                _ => {
+                                    log::error!("Audio stream error: {err}");
+                                    *error.lock() = Some(err.to_string());
                                 }
                             }
-                            cpal::ErrorKind::DeviceChanged => {
-                                log::warn!("Audio device changed; playback stream continues: {err}");
-                            }
-                            _ => {
-                                log::error!("Audio stream error: {err}");
-                                *error.lock() = Some(err.to_string());
-                            }
-                        }
-                    },
-                    None,
-                )
-                .map_err(|e| Error::Output(e.to_string()))
+                        },
+                        None,
+                    )
+                    .map_err(|e| Error::Output(e.to_string()))
             };
         }
 
