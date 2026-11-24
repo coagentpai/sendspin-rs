@@ -10,10 +10,14 @@ pub mod gain;
 pub mod pool;
 /// Sync correction planner for drop/insert cadence
 pub mod sync_correction;
-/// Synced playback helper using output timestamps
+/// Synced playback helper using output timestamps (cpal backend)
 pub mod synced_player;
 /// Core audio type definitions (Sample, Codec, AudioFormat, AudioBuffer)
 pub mod types;
+
+/// Synced playback helper using native PipeWire streams
+#[cfg(feature = "pipewire")]
+pub mod pw_synced_player;
 
 pub(crate) mod player_api;
 mod player_session;
@@ -31,3 +35,6 @@ pub use sync_correction::{CorrectionPlanner, CorrectionSchedule};
 pub use synced_player::PlaybackControl;
 pub use synced_player::{ProcessCallback, SyncedPlayer, SyncedPlayerConfig};
 pub use types::{AudioBuffer, AudioFormat, Codec};
+
+#[cfg(feature = "pipewire")]
+pub use pw_synced_player::PwSyncedPlayer;

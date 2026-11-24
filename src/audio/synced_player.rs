@@ -1396,6 +1396,66 @@ impl crate::audio::PlayerOutput for PlaybackControl {
     }
 }
 
+/// For a backend that owns its output stream instead of a cpal one.
+#[cfg(feature = "pipewire")]
+impl PlaybackControl {
+    /// Creates the playback state for such a backend: the control handle, and
+    /// the render callback its audio thread calls (see
+    /// `SyncedPlayer::render_callback`).
+    pub(crate) fn with_render_callback(
+        format: AudioFormat,
+        clock_sync: Arc<Mutex<ClockSync>>,
+        volume: u8,
+        muted: bool,
+        process_callback: Option<ProcessCallback>,
+    ) -> (Self, impl FnMut(&mut [f32], Duration) + Send + 'static) {
+        let control = Self {
+            format,
+            queue: Arc::new(Mutex::new(PlaybackQueue::new())),
+            last_error: Arc::new(Mutex::new(None)),
+            gain: GainControl::new(volume, muted),
+            static_delay_us: Arc::new(AtomicU64::new(0)),
+        };
+        let render = SyncedPlayer::render_callback(
+            Arc::clone(&control.queue),
+            clock_sync,
+            &control.format,
+            CallbackConfig {
+                gain_control: control.gain.clone(),
+                process_callback,
+                static_delay_us: Arc::clone(&control.static_delay_us),
+            },
+        );
+        (control, render)
+    }
+
+    /// The volume/mute control shared with the render callback.
+    pub(crate) fn gain_control(&self) -> &GainControl {
+        &self.gain
+    }
+
+    /// Retains an output failure, which `commit`, `clear` and the setters
+    /// report from then on.
+    pub(crate) fn fail(&self, error: String) {
+        *self.last_error.lock() = Some(error);
+    }
+
+    /// Takes the retained output failure, if any.
+    pub(crate) fn take_error(&self) -> Option<String> {
+        self.last_error.lock().take()
+    }
+
+    /// Whether an output failure is retained.
+    pub(crate) fn has_error(&self) -> bool {
+        self.last_error.lock().is_some()
+    }
+
+    /// Current static delay in milliseconds.
+    pub(crate) fn static_delay_ms(&self) -> u16 {
+        (self.static_delay_us.load(Ordering::Relaxed) / 1_000) as u16
+    }
+}
+
 impl SyncedPlayer {
     /// Create a new synced player using the provided clock sync and optional device.
     ///
